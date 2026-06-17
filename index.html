@@ -200,57 +200,105 @@ if (_mj && PLAYLISTS[0]) {
 <script src="https://cdn.jsdelivr.net/npm/meting@2.0.1/dist/Meting.min.js"></script>
 
 <script>
+(function () {
+'use strict';
+
+/* ====================================================
+   配置常量
+   ==================================================== */
+const LS_VOLUME    = 'ffp_volume';
+const LS_LAST_IDX  = 'ffp_lastIdx';
+const LS_LAST_PL   = 'ffp_lastPL';
+const RETRY_LIMIT  = 3;
+const PROGRESS_FPS  = 4;   // 进度条每秒更新次数（requestAnimationFrame 节流）
+
 /* ====================================================
    状态
    ==================================================== */
-var ap = null;
-var isPlaying = false;
-var curPLIdx = 0;
-var plCache = {};
-var switching = false;
-var pendingIdx = -1;
-var suppressListSwitch = false;
+let ap = null;
+let isPlaying = false;
+let curPLIdx = parseInt(localStorage.getItem(LS_LAST_PL)) || 0;
+if (curPLIdx >= PLAYLISTS.length) curPLIdx = 0;
+const plCache = {};
+let switching = false;
+let pendingIdx = -1;
+let suppressListSwitch = false;
+let retryCount = 0;
+let progressRAF = null;
 
-var metingEl = document.getElementById('mj') || document.querySelector('meting-js');
+const metingEl = document.getElementById('mj') || document.querySelector('meting-js');
 
-/* DOM */
-var $status = document.getElementById('status');
-var $main   = document.getElementById('main');
-var $cimg   = document.getElementById('cimg');
-var $disc   = document.getElementById('disc');
-var $tn     = document.getElementById('tn');
-var $ta     = document.getElementById('ta');
-var $pfill  = document.getElementById('pfill');
-var $pbar   = document.getElementById('pbar');
-var $tc     = document.getElementById('tc');
-var $tt     = document.getElementById('tt');
-var $icP    = document.getElementById('icP');
-var $plist  = document.getElementById('plist');
-var $tabs   = document.getElementById('tabs');
-var $sinp   = document.getElementById('sinp');
-var $scl    = document.getElementById('scl');
-var $phT    = document.getElementById('phT');
-var $phC    = document.getElementById('phC');
+/* ====================================================
+   DOM 缓存（一次性查询，避免重复 DOM 操作）
+   ==================================================== */
+const $ = (id) => document.getElementById(id);
+const dom = {
+    status: $('status'),   main: $('main'),
+    cimg: $('cimg'),       disc: $('disc'),
+    tn: $('tn'),           ta: $('ta'),
+    pfill: $('pfill'),     pbar: $('pbar'),
+    tc: $('tc'),           tt: $('tt'),
+    icP: $('icP'),         plist: $('plist'),
+    tabs: $('tabs'),       sinp: $('sinp'),
+    scl: $('scl'),         phT: $('phT'),
+    phC: $('phC'),         vol: $('vol'),
+    bPl: $('bPl'),         bPr: $('bPr'),
+    bNx: $('bNx'),         bSh: $('bSh'),
+    bLp: $('bLp'),
+};
 
 /* ====================================================
    工具
    ==================================================== */
 function fmt(s) {
     if (!s || isNaN(s) || !isFinite(s)) return '0:00';
-    return Math.floor(s / 60) + ':' + (Math.floor(s % 60) < 10 ? '0' : '') + Math.floor(s % 60);
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return m + ':' + (sec < 10 ? '0' : '') + sec;
 }
+
 function ck(pl) { return pl.server + '-' + pl.id; }
 
+/* 安全设置文本（防 XSS） */
+function setText(el, text) {
+    if (el) el.textContent = text || '';
+}
+
 /* ====================================================
-   星星
+   持久化
    ==================================================== */
-(function () {
-    var c = document.getElementById('stars'), n = Math.min(120, Math.floor(window.innerWidth * 0.1));
-    var f = document.createDocumentFragment();
-    for (var i = 0; i < n; i++) {
-        var s = document.createElement('div'); s.className = 'star';
-        var sz = Math.random() < 0.85 ? (Math.random() * 2 + 0.5) : (Math.random() * 2 + 2);
-        s.style.cssText = 'width:' + sz + 'px;height:' + sz + 'px;top:' + (Math.random() * 100).toFixed(1) + '%;left:' + (Math.random() * 100).toFixed(1) + '%;--lo:' + (Math.random() * 0.3 + 0.05).toFixed(2) + ';--hi:' + (Math.random() * 0.5 + 0.5).toFixed(2) + ';--d:' + (Math.random() * 4 + 2).toFixed(1) + 's;animation-delay:' + (Math.random() * 5).toFixed(1) + 's;';
+function saveVolume(v) {
+    try { localStorage.setItem(LS_VOLUME, String(Math.round(v * 100))); } catch (_) {}
+}
+function loadVolume() {
+    const v = parseInt(localStorage.getItem(LS_VOLUME));
+    return isNaN(v) ? 70 : Math.max(0, Math.min(100, v));
+}
+function saveLastTrack() {
+    if (!ap) return;
+    try {
+        localStorage.setItem(LS_LAST_IDX, String(ap.list.index));
+        localStorage.setItem(LS_LAST_PL, String(curPLIdx));
+    } catch (_) {}
+}
+
+/* ====================================================
+   星星（DocumentFragment 批量创建）
+   ==================================================== */
+(function initStars() {
+    const c = $('stars');
+    const n = Math.min(120, Math.floor(window.innerWidth * 0.1));
+    const f = document.createDocumentFragment();
+    for (let i = 0; i < n; i++) {
+        const s = document.createElement('div');
+        s.className = 'star';
+        const sz = Math.random() < 0.85 ? (Math.random() * 2 + 0.5) : (Math.random() * 2 + 2);
+        s.style.cssText = 'width:' + sz + 'px;height:' + sz + 'px;top:' +
+            (Math.random() * 100).toFixed(1) + '%;left:' + (Math.random() * 100).toFixed(1) +
+            '%;--lo:' + (Math.random() * 0.3 + 0.05).toFixed(2) +
+            ';--hi:' + (Math.random() * 0.5 + 0.5).toFixed(2) +
+            ';--d:' + (Math.random() * 4 + 2).toFixed(1) +
+            's;animation-delay:' + (Math.random() * 5).toFixed(1) + 's;';
         f.appendChild(s);
     }
     c.appendChild(f);
@@ -260,30 +308,30 @@ function ck(pl) { return pl.server + '-' + pl.id; }
    等待 MetingJS 元素就绪
    ==================================================== */
 function waitForMeting(el, maxTries) {
-    return new Promise(function (resolve, reject) {
-        var tries = 0;
-        var limit = maxTries || 30;
-        var timer = setInterval(function () {
+    return new Promise((resolve, reject) => {
+        let tries = 0;
+        const limit = maxTries || 30;
+        const timer = setInterval(() => {
             tries++;
             try {
-                if (el && el.aplayer && el.aplayer.list && el.aplayer.list.audios && el.aplayer.list.audios.length > 0) {
+                if (el?.aplayer?.list?.audios?.length > 0) {
                     clearInterval(timer);
                     resolve(el.aplayer);
                 }
-            } catch (e) {}
-            if (tries >= limit) { clearInterval(timer); reject(); }
+            } catch (_) {}
+            if (tries >= limit) { clearInterval(timer); reject(new Error('MetingJS timeout')); }
         }, 500);
     });
 }
 
 /* ====================================================
-   提取 audios（过滤空 URL，深拷贝解耦）
+   提取 audios（过滤空 URL）
    ==================================================== */
 function extractAudios(aPlayer) {
-    var result = [];
-    var src = aPlayer.list.audios;
-    for (var i = 0; i < src.length; i++) {
-        var u = src[i].url;
+    const result = [];
+    const src = aPlayer.list.audios;
+    for (let i = 0; i < src.length; i++) {
+        const u = src[i].url;
         if (!u) continue;
         result.push({
             name:   src[i].name   || src[i].title  || '未知',
@@ -300,35 +348,40 @@ function extractAudios(aPlayer) {
    通过临时 MetingJS 元素加载歌单
    ==================================================== */
 function loadViaMeting(pl) {
-    return new Promise(function (resolve, reject) {
-        var wrap = document.createElement('div');
+    return new Promise((resolve, reject) => {
+        const wrap = document.createElement('div');
         wrap.style.cssText = 'position:fixed;left:-9999px;top:0;width:0;height:0;overflow:hidden;pointer-events:none;';
         document.body.appendChild(wrap);
 
-        var el = document.createElement('meting-js');
+        const el = document.createElement('meting-js');
         el.setAttribute('server', pl.server);
         el.setAttribute('type', 'playlist');
         el.setAttribute('id', pl.id);
         el.setAttribute('theme', '#ffd700');
         wrap.appendChild(el);
 
-        waitForMeting(el, 30).then(function (tmpAp) {
-            var audios = extractAudios(tmpAp);
-            try { tmpAp.pause(); } catch (e) {}
-            setTimeout(function () { try { wrap.remove(); } catch (e) {} }, 500);
+        const cleanup = () => { try { wrap.remove(); } catch (_) {} };
+
+        waitForMeting(el, 30).then((tmpAp) => {
+            const audios = extractAudios(tmpAp);
+            try { tmpAp.pause(); } catch (_) {}
+            setTimeout(cleanup, 500);
             resolve(audios);
-        }).catch(function () {
-            try { wrap.remove(); } catch (e) {}
-            reject();
+        }).catch(() => {
+            cleanup();
+            reject(new Error('加载歌单失败'));
         });
     });
 }
 
 /* ====================================================
-   应用数据到主 APlayer（深拷贝防污染）
+   应用数据到主 APlayer
    ==================================================== */
 function applyToPlayer(audios) {
-    var copy = JSON.parse(JSON.stringify(audios));
+    // structuredClone 替代 JSON.parse(JSON.stringify())，性能更好
+    const copy = (typeof structuredClone === 'function')
+        ? structuredClone(audios)
+        : JSON.parse(JSON.stringify(audios));
     suppressListSwitch = true;
     ap.list.clear();
     ap.list.add(copy);
@@ -338,53 +391,67 @@ function applyToPlayer(audios) {
 }
 
 /* ====================================================
-   列表 UI（构建，不做过滤）
+   列表 UI（DocumentFragment 批量构建）
    ==================================================== */
 function buildList(tracks) {
-    $plist.innerHTML = '';
-    for (var i = 0; i < tracks.length; i++) {
-        (function (idx) {
-            var d = document.createElement('div');
-            d.className = 'pi' + (idx === ap.list.index ? ' on' : '');
-            d.dataset.ri = idx;
-            d.innerHTML =
-                '<span class="pi-i">' + (idx + 1) + '</span>' +
-                '<span class="pn">' + (tracks[idx].name || '未知') + '</span>' +
-                '<span class="pa">' + (tracks[idx].artist || '') + '</span>';
-            $plist.appendChild(d);
-        })(i);
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < tracks.length; i++) {
+        const d = document.createElement('div');
+        d.className = 'pi' + (i === ap.list.index ? ' on' : '');
+        d.dataset.ri = i;
+
+        const idxSpan = document.createElement('span');
+        idxSpan.className = 'pi-i';
+        idxSpan.textContent = i + 1;
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'pn';
+        nameSpan.textContent = tracks[i].name || '未知';
+
+        const artistSpan = document.createElement('span');
+        artistSpan.className = 'pa';
+        artistSpan.textContent = tracks[i].artist || '';
+
+        d.appendChild(idxSpan);
+        d.appendChild(nameSpan);
+        d.appendChild(artistSpan);
+        frag.appendChild(d);
     }
-    /* 空状态占位 */
-    var emp = document.createElement('div');
+
+    // 空状态占位
+    const emp = document.createElement('div');
     emp.className = 'pe';
     emp.id = 'plEmp';
     emp.textContent = '未找到匹配的歌曲';
     emp.style.display = 'none';
-    $plist.appendChild(emp);
+    frag.appendChild(emp);
 
-    $phC.textContent = tracks.length + ' 首';
-    filterList($sinp.value);
+    dom.plist.innerHTML = '';
+    dom.plist.appendChild(frag);
+
+    setText(dom.phC, tracks.length + ' 首');
+    filterList(dom.sinp.value);
 }
 
 /* ====================================================
-   列表过滤（不重建 DOM，只切换 display）
+   列表过滤
    ==================================================== */
 function filterList(keyword) {
-    var kw = (keyword || '').toLowerCase();
-    var items = $plist.querySelectorAll('.pi');
-    var shown = 0;
-    for (var i = 0; i < items.length; i++) {
-        var nm = items[i].querySelector('.pn').textContent.toLowerCase();
-        var ar = items[i].querySelector('.pa').textContent.toLowerCase();
-        var match = !kw || nm.indexOf(kw) !== -1 || ar.indexOf(kw) !== -1;
+    const kw = (keyword || '').toLowerCase();
+    const items = dom.plist.querySelectorAll('.pi');
+    let shown = 0;
+    for (let i = 0; i < items.length; i++) {
+        const nm = items[i].querySelector('.pn').textContent.toLowerCase();
+        const ar = items[i].querySelector('.pa').textContent.toLowerCase();
+        const match = !kw || nm.includes(kw) || ar.includes(kw);
         items[i].style.display = match ? '' : 'none';
         if (match) {
             shown++;
             items[i].querySelector('.pi-i').textContent = shown;
         }
     }
-    $phC.textContent = shown + ' 首';
-    var emp = document.getElementById('plEmp');
+    setText(dom.phC, shown + ' 首');
+    const emp = $('plEmp');
     if (emp) emp.style.display = (shown === 0 && kw) ? '' : 'none';
 }
 
@@ -392,68 +459,136 @@ function filterList(keyword) {
    歌曲 UI 更新
    ==================================================== */
 function updateTrackUI(idx) {
-    var tracks = ap.list.audios;
+    const tracks = ap.list.audios;
     if (idx < 0 || idx >= tracks.length) return;
-    var t = tracks[idx];
-    $disc.classList.add('fo');
-    setTimeout(function () {
-        $cimg.src = t.cover || '';
-        $cimg.style.display = t.cover ? '' : 'none';
-        $disc.classList.remove('fo');
-    }, 300);
-    $tn.textContent = t.name || '未知';
-    $ta.textContent = t.artist || '';
+    const t = tracks[idx];
 
-    var items = $plist.querySelectorAll('.pi');
-    for (var i = 0; i < items.length; i++) {
+    dom.disc.classList.add('fo');
+    setTimeout(() => {
+        dom.cimg.src = t.cover || '';
+        dom.cimg.style.display = t.cover ? '' : 'none';
+        dom.disc.classList.remove('fo');
+    }, 300);
+
+    setText(dom.tn, t.name || '未知');
+    setText(dom.ta, t.artist || '');
+
+    const items = dom.plist.querySelectorAll('.pi');
+    for (let i = 0; i < items.length; i++) {
         items[i].classList.toggle('on', +items[i].dataset.ri === idx);
     }
-    var ac = $plist.querySelector('.pi.on');
+    const ac = dom.plist.querySelector('.pi.on');
     if (ac && ac.style.display !== 'none') {
         ac.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+
+    updateMediaSession(t);
+    saveLastTrack();
 }
 
+/* ====================================================
+   Media Session API（系统媒体控制）
+   ==================================================== */
+function updateMediaSession(track) {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+        title: track.name || '未知',
+        artist: track.artist || '',
+        artwork: track.cover ? [{ src: track.cover, sizes: '200x200', type: 'image/jpeg' }] : []
+    });
+}
+
+function bindMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.setActionHandler('play',  () => ap?.play());
+    navigator.mediaSession.setActionHandler('pause', () => ap?.pause());
+    navigator.mediaSession.setActionHandler('previoustrack', () => {
+        if (!ap) return;
+        const i = (ap.list.index - 1 + ap.list.audios.length) % ap.list.audios.length;
+        ap.list.switch(i);
+        setTimeout(() => ap.play(), 80);
+    });
+    navigator.mediaSession.setActionHandler('nexttrack', () => {
+        if (!ap) return;
+        const i = (ap.list.index + 1) % ap.list.audios.length;
+        ap.list.switch(i);
+        setTimeout(() => ap.play(), 80);
+    });
+}
+
+/* ====================================================
+   播放/暂停图标
+   ==================================================== */
 function showPauseIcon() {
-    $icP.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
-    $disc.classList.add('on'); isPlaying = true;
+    dom.icP.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
+    dom.disc.classList.add('on');
+    isPlaying = true;
+    startProgressLoop();
 }
 function showPlayIcon() {
-    $icP.innerHTML = '<path d="M8 5v14l11-7z"/>';
-    $disc.classList.remove('on'); isPlaying = false;
+    dom.icP.innerHTML = '<path d="M8 5v14l11-7z"/>';
+    dom.disc.classList.remove('on');
+    isPlaying = false;
+    stopProgressLoop();
+}
+
+/* ====================================================
+   进度条（requestAnimationFrame，暂停时不消耗性能）
+   ==================================================== */
+let lastProgressUpdate = 0;
+function progressTick(ts) {
+    if (!isPlaying || !ap?.audio) { progressRAF = null; return; }
+    if (ts - lastProgressUpdate < 1000 / PROGRESS_FPS) {
+        progressRAF = requestAnimationFrame(progressTick);
+        return;
+    }
+    lastProgressUpdate = ts;
+    const c = ap.audio.currentTime || 0;
+    const d = ap.audio.duration || 0;
+    dom.tc.textContent = fmt(c);
+    dom.tt.textContent = fmt(d);
+    dom.pfill.style.width = d > 0 ? ((c / d) * 100).toFixed(2) + '%' : '0%';
+    progressRAF = requestAnimationFrame(progressTick);
+}
+function startProgressLoop() {
+    if (!progressRAF) progressRAF = requestAnimationFrame(progressTick);
+}
+function stopProgressLoop() {
+    // 不主动 cancel，让 tick 自然退出
 }
 
 /* ====================================================
    Tab
    ==================================================== */
 function buildTabs() {
-    $tabs.innerHTML = '';
-    for (var i = 0; i < PLAYLISTS.length; i++) {
-        (function (idx) {
-            var b = document.createElement('button');
-            b.className = 'tbn' + (idx === curPLIdx ? ' on' : '');
-            b.textContent = PLAYLISTS[idx].name;
-            b.addEventListener('click', function () { switchPlaylist(idx); });
-            $tabs.appendChild(b);
-        })(i);
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < PLAYLISTS.length; i++) {
+        const b = document.createElement('button');
+        b.className = 'tbn' + (i === curPLIdx ? ' on' : '');
+        b.textContent = PLAYLISTS[i].name;
+        b.addEventListener('click', () => switchPlaylist(i));
+        frag.appendChild(b);
     }
+    dom.tabs.innerHTML = '';
+    dom.tabs.appendChild(frag);
 }
 
 /* ====================================================
-   切换歌单（缓存命中瞬间切换，未命中走 MetingJS）
+   切换歌单
    ==================================================== */
 function switchPlaylist(idx) {
-    if (idx === curPLIdx && ap && ap.list.audios.length > 0) return;
+    if (idx === curPLIdx && ap?.list?.audios?.length > 0) return;
 
-    var pl = PLAYLISTS[idx];
-    var key = ck(pl);
-    var cached = !!plCache[key];
+    const pl = PLAYLISTS[idx];
+    const key = ck(pl);
+    const cached = !!plCache[key];
 
     curPLIdx = idx;
+    try { localStorage.setItem(LS_LAST_PL, String(idx)); } catch (_) {}
 
-    /* Tab 高亮 */
-    var btns = $tabs.querySelectorAll('.tbn');
-    for (var i = 0; i < btns.length; i++) {
+    // Tab 高亮
+    const btns = dom.tabs.querySelectorAll('.tbn');
+    for (let i = 0; i < btns.length; i++) {
         btns[i].classList.remove('on', 'ld');
         if (i === idx) {
             btns[i].classList.add('on');
@@ -461,39 +596,34 @@ function switchPlaylist(idx) {
         }
     }
 
-    $sinp.value = '';
-    $scl.classList.remove('show');
-    $phT.textContent = pl.name;
+    dom.sinp.value = '';
+    dom.scl.classList.remove('show');
+    setText(dom.phT, pl.name);
 
     if (cached) {
         applyToPlayer(plCache[key]);
     } else {
-        /* 正在加载中 → 记录 pending，加载完后自动切到目标 */
-        if (switching) {
-            pendingIdx = idx;
-            return;
-        }
+        if (switching) { pendingIdx = idx; return; }
 
         switching = true;
-        $plist.innerHTML = '<div class="pe"><span class="da">加载中</span></div>';
-        $phC.textContent = '--';
+        dom.plist.innerHTML = '<div class="pe"><span class="da">加载中</span></div>';
+        setText(dom.phC, '--');
 
-        loadViaMeting(pl).then(function (audios) {
+        loadViaMeting(pl).then((audios) => {
             if (curPLIdx !== idx && pendingIdx === -1) return;
             plCache[key] = audios;
             applyToPlayer(audios);
-        }).catch(function () {
+        }).catch(() => {
             if (curPLIdx !== idx) return;
-            $plist.innerHTML = '<div class="pe">加载失败，请检查歌单ID和网络</div>';
-            $phC.textContent = '0 首';
-        }).finally(function () {
+            dom.plist.innerHTML = '<div class="pe">加载失败，请检查歌单ID和网络</div>';
+            setText(dom.phC, '0 首');
+        }).finally(() => {
             switching = false;
-            var btns = $tabs.querySelectorAll('.tbn');
-            for (var i = 0; i < btns.length; i++) btns[i].classList.remove('ld');
+            const btns = dom.tabs.querySelectorAll('.tbn');
+            for (let i = 0; i < btns.length; i++) btns[i].classList.remove('ld');
 
-            /* 处理等待期间的切换请求 */
             if (pendingIdx !== -1 && pendingIdx !== curPLIdx) {
-                var next = pendingIdx;
+                const next = pendingIdx;
                 pendingIdx = -1;
                 switchPlaylist(next);
             } else {
@@ -504,46 +634,88 @@ function switchPlaylist(idx) {
 }
 
 /* ====================================================
-   搜索（不重建 DOM，只过滤显示）
+   搜索
    ==================================================== */
-var searchTimer = null;
-$sinp.addEventListener('input', function () {
-    var v = $sinp.value.trim();
-    $scl.classList.toggle('show', v.length > 0);
+let searchTimer = null;
+dom.sinp.addEventListener('input', () => {
+    const v = dom.sinp.value.trim();
+    dom.scl.classList.toggle('show', v.length > 0);
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(function () { filterList(v); }, 200);
+    searchTimer = setTimeout(() => filterList(v), 200);
 });
-$scl.addEventListener('click', function () {
-    $sinp.value = '';
-    $scl.classList.remove('show');
+dom.scl.addEventListener('click', () => {
+    dom.sinp.value = '';
+    dom.scl.classList.remove('show');
     filterList('');
-    $sinp.focus();
+    dom.sinp.focus();
 });
 
 /* ====================================================
    列表事件委托
    ==================================================== */
-$plist.addEventListener('click', function (e) {
-    var item = e.target.closest('.pi');
+dom.plist.addEventListener('click', (e) => {
+    const item = e.target.closest('.pi');
     if (!item || !ap) return;
-    var idx = +item.dataset.ri;
+    const idx = +item.dataset.ri;
     ap.list.switch(idx);
-    setTimeout(function () { ap.play(); }, 80);
+    setTimeout(() => ap.play(), 80);
 });
 
 /* ====================================================
    控件
    ==================================================== */
-document.getElementById('bPl').onclick = function () { isPlaying ? ap.pause() : ap.play(); };
-document.getElementById('bPr').onclick = function () { var i = (ap.list.index - 1 + ap.list.audios.length) % ap.list.audios.length; ap.list.switch(i); setTimeout(function () { ap.play(); }, 80); };
-document.getElementById('bNx').onclick = function () { var i = (ap.list.index + 1) % ap.list.audios.length; ap.list.switch(i); setTimeout(function () { ap.play(); }, 80); };
-document.getElementById('bSh').onclick = function () { if (ap.list.audios.length < 2) return; var r; do { r = Math.floor(Math.random() * ap.list.audios.length); } while (r === ap.list.index); ap.list.switch(r); setTimeout(function () { ap.play(); }, 80); };
-document.getElementById('bLp').onclick = function () { ap.seek(0); ap.play(); };
-document.getElementById('vol').oninput = function () { ap.volume(this.value / 100, true); };
-$pbar.onclick = function (e) {
-    var r = $pbar.getBoundingClientRect(), p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-    if (ap.audio && ap.audio.duration && isFinite(ap.audio.duration)) ap.seek(p * ap.audio.duration);
+dom.bPl.onclick = () => { isPlaying ? ap.pause() : ap.play(); };
+dom.bPr.onclick = () => {
+    const i = (ap.list.index - 1 + ap.list.audios.length) % ap.list.audios.length;
+    ap.list.switch(i); setTimeout(() => ap.play(), 80);
 };
+dom.bNx.onclick = () => {
+    const i = (ap.list.index + 1) % ap.list.audios.length;
+    ap.list.switch(i); setTimeout(() => ap.play(), 80);
+};
+dom.bSh.onclick = () => {
+    if (ap.list.audios.length < 2) return;
+    let r; do { r = Math.floor(Math.random() * ap.list.audios.length); } while (r === ap.list.index);
+    ap.list.switch(r); setTimeout(() => ap.play(), 80);
+};
+dom.bLp.onclick = () => { ap.seek(0); ap.play(); };
+
+/* 音量：持久化 + 实时更新 */
+const savedVol = loadVolume();
+dom.vol.value = savedVol;
+dom.vol.oninput = function () {
+    const v = this.value / 100;
+    ap.volume(v, true);
+    saveVolume(v);
+};
+
+/* 进度条：点击 + 拖拽 seek */
+let seeking = false;
+function seekFromEvent(e) {
+    const r = dom.pbar.getBoundingClientRect();
+    const p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    if (ap?.audio?.duration && isFinite(ap.audio.duration)) {
+        ap.seek(p * ap.audio.duration);
+    }
+}
+dom.pbar.addEventListener('mousedown', (e) => {
+    seeking = true;
+    dom.pfill.style.transition = 'none';
+    seekFromEvent(e);
+});
+document.addEventListener('mousemove', (e) => {
+    if (!seeking) return;
+    const r = dom.pbar.getBoundingClientRect();
+    const p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    dom.pfill.style.width = (p * 100).toFixed(2) + '%';
+    seekFromEvent(e);
+});
+document.addEventListener('mouseup', () => {
+    if (seeking) {
+        seeking = false;
+        dom.pfill.style.transition = '';
+    }
+});
 
 /* ====================================================
    绑定 APlayer 事件
@@ -551,73 +723,105 @@ $pbar.onclick = function (e) {
 function bindEvents() {
     ap.on('play', showPauseIcon);
     ap.on('pause', showPlayIcon);
-    ap.on('listswitch', function (data) {
+    ap.on('listswitch', (data) => {
         if (!suppressListSwitch) updateTrackUI(data.index);
     });
-    ap.on('ended', function () {
-        var next = (ap.list.index + 1) % ap.list.audios.length;
+    ap.on('ended', () => {
+        retryCount = 0;
+        const next = (ap.list.index + 1) % ap.list.audios.length;
         ap.list.switch(next);
-        setTimeout(function () { ap.play(); }, 100);
+        setTimeout(() => ap.play(), 100);
     });
-    ap.volume(0.7, true);
+
+    /* 音频错误自动重试 */
+    ap.audio.addEventListener('error', () => {
+        retryCount++;
+        if (retryCount <= RETRY_LIMIT) {
+            setTimeout(() => ap.play(), 1000);
+        } else {
+            retryCount = 0;
+            // 跳到下一首
+            const next = (ap.list.index + 1) % ap.list.audios.length;
+            ap.list.switch(next);
+            setTimeout(() => ap.play(), 200);
+        }
+    });
+
+    ap.audio.addEventListener('playing', () => { retryCount = 0; });
+
+    /* 恢复音量 */
+    ap.volume(savedVol / 100, true);
+
+    /* Media Session */
+    bindMediaSession();
 }
 
 /* ====================================================
-   键盘快捷键（排除按钮焦点）
+   键盘快捷键
    ==================================================== */
-document.addEventListener('keydown', function (e) {
+document.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON' || !ap) return;
-    var vol = document.getElementById('vol');
     switch (e.code) {
         case 'Space':
-            e.preventDefault(); isPlaying ? ap.pause() : ap.play(); break;
+            e.preventDefault();
+            isPlaying ? ap.pause() : ap.play();
+            break;
         case 'ArrowLeft':
-            e.preventDefault(); ap.seek(Math.max(0, (ap.audio.currentTime || 0) - 5)); break;
+            e.preventDefault();
+            ap.seek(Math.max(0, (ap.audio.currentTime || 0) - 5));
+            break;
         case 'ArrowRight':
-            e.preventDefault(); ap.seek(Math.min(ap.audio.duration || 0, (ap.audio.currentTime || 0) + 5)); break;
-        case 'ArrowUp':
             e.preventDefault();
-            var v1 = Math.min(1, (ap.audio.volume || 0) + 0.1);
-            ap.volume(v1, true); vol.value = Math.round(v1 * 100); break;
-        case 'ArrowDown':
+            ap.seek(Math.min(ap.audio.duration || 0, (ap.audio.currentTime || 0) + 5));
+            break;
+        case 'ArrowUp': {
             e.preventDefault();
-            var v2 = Math.max(0, (ap.audio.volume || 0) - 0.1);
-            ap.volume(v2, true); vol.value = Math.round(v2 * 100); break;
+            const v1 = Math.min(1, (ap.audio.volume || 0) + 0.1);
+            ap.volume(v1, true);
+            dom.vol.value = Math.round(v1 * 100);
+            saveVolume(v1);
+            break;
+        }
+        case 'ArrowDown': {
+            e.preventDefault();
+            const v2 = Math.max(0, (ap.audio.volume || 0) - 0.1);
+            ap.volume(v2, true);
+            dom.vol.value = Math.round(v2 * 100);
+            saveVolume(v2);
+            break;
+        }
     }
 });
-
-/* ====================================================
-   进度条（仅播放时更新）
-   ==================================================== */
-setInterval(function () {
-    if (!isPlaying || !ap || !ap.audio) return;
-    var c = ap.audio.currentTime || 0, d = ap.audio.duration || 0;
-    $tc.textContent = fmt(c);
-    $tt.textContent = fmt(d);
-    $pfill.style.width = d > 0 ? ((c / d) * 100).toFixed(2) + '%' : '0%';
-}, 400);
 
 /* ====================================================
    启动
    ==================================================== */
 buildTabs();
-$phT.textContent = PLAYLISTS[0].name;
+setText(dom.phT, PLAYLISTS[curPLIdx].name);
 
-waitForMeting(metingEl, 30).then(function (aPlayer) {
+waitForMeting(metingEl, 30).then((aPlayer) => {
     ap = aPlayer;
     plCache[ck(PLAYLISTS[0])] = extractAudios(ap);
 
     bindEvents();
     buildList(ap.list.audios);
-    updateTrackUI(0);
 
-    $status.style.display = 'none';
-    $main.style.display = 'block';
-}).catch(function () {
-    $status.innerHTML = '加载失败，请检查：<br><br>1. 歌单 ID 是否正确<br>2. 歌单是否为公开状态<br>3. 网络是否可用<br><br><span style="font-size:0.75rem;opacity:0.4">可刷新页面重试</span>';
-    $status.style.textAlign = 'center';
-    $status.style.lineHeight = '2';
+    // 恢复上次播放位置
+    const lastIdx = parseInt(localStorage.getItem(LS_LAST_IDX));
+    if (!isNaN(lastIdx) && lastIdx >= 0 && lastIdx < ap.list.audios.length) {
+        ap.list.switch(lastIdx);
+    }
+    updateTrackUI(ap.list.index);
+
+    dom.status.style.display = 'none';
+    dom.main.style.display = 'block';
+}).catch(() => {
+    dom.status.innerHTML = '加载失败，请检查：<br><br>1. 歌单 ID 是否正确<br>2. 歌单是否为公开状态<br>3. 网络是否可用<br><br><span style="font-size:0.75rem;opacity:0.4">可刷新页面重试</span>';
+    dom.status.style.textAlign = 'center';
+    dom.status.style.lineHeight = '2';
 });
+
+})();
 </script>
 </body>
 </html>
