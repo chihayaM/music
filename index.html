@@ -173,7 +173,6 @@
 </div>
 
 <!-- MetingJS 容器（配置在下方脚本中动态完成） -->
-<div id="mb"><meting-js id="mj"></meting-js></div>
 
 <script src="https://cdn.jsdelivr.net/npm/aplayer@1.10.1/dist/APlayer.min.js"></script>
 
@@ -192,17 +191,8 @@ var PROXY_BASE = 'https://music.akira0803.workers.dev';
 var PROXY_API  = PROXY_BASE + '/api';
 var PROXY_AUDIO = PROXY_BASE + '/audio';
 
-/* 配置 <meting-js> 元素（在 meting.min.js 加载前完成） */
-var _mj = document.getElementById('mj');
-if (_mj && PLAYLISTS[0]) {
-    _mj.setAttribute('server', PLAYLISTS[0].server);
-    _mj.setAttribute('type', 'playlist');
-    _mj.setAttribute('id',    PLAYLISTS[0].id);
-    _mj.setAttribute('theme', '#ffd700');
-}
 </script>
 
-<script src="https://cdn.jsdelivr.net/npm/meting@2.0.1/dist/Meting.min.js"></script>
 
 <script>
 /* ====================================================
@@ -216,7 +206,6 @@ var switching = false;
 var pendingIdx = -1;
 var suppressListSwitch = false;
 
-var metingEl = document.getElementById('mj') || document.querySelector('meting-js');
 
 /* DOM */
 var $status = document.getElementById('status');
@@ -264,22 +253,6 @@ function ck(pl) { return pl.server + '-' + pl.id; }
 /* ====================================================
    等待 MetingJS 元素就绪
    ==================================================== */
-function waitForMeting(el, maxTries) {
-    return new Promise(function (resolve, reject) {
-        var tries = 0;
-        var limit = maxTries || 30;
-        var timer = setInterval(function () {
-            tries++;
-            try {
-                if (el && el.aplayer && el.aplayer.list && el.aplayer.list.audios && el.aplayer.list.audios.length > 0) {
-                    clearInterval(timer);
-                    resolve(el.aplayer);
-                }
-            } catch (e) {}
-            if (tries >= limit) { clearInterval(timer); reject(); }
-        }, 500);
-    });
-}
 
 /* ====================================================
    提取 audios（过滤空 URL，深拷贝解耦）
@@ -334,8 +307,6 @@ function loadViaMeting(pl) {
         xhr.onerror = function () { reject(new Error('network')); };
         xhr.ontimeout = function () { reject(new Error('timeout')); };
         xhr.send();
-    });
-}
     });
 }
 
