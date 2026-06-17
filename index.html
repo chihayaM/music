@@ -187,14 +187,6 @@ var PLAYLISTS = [
     { id: '7225711996',  name: '旋曜玉帛',       server: 'netease' }
 ];
 
-/* 缓存配置 — Actions 会把音频推到 cache 分支 */
-var CACHE_BASE = (location.hostname.indexOf('.github.io') !== -1)
-    ? location.origin + location.pathname.replace(/\/[^\/]*$/, '') + '/../cache'
-    : '';
-// 如果是 chihayam.github.io/music/ 则 CACHE_BASE = chihayam.github.io/cache
-// 需要根据实际部署调整，或直接硬编码：
-CACHE_BASE = 'https://raw.githubusercontent.com/chihayaM/music/cache';
-
 /* 配置 <meting-js> 元素（在 meting.min.js 加载前完成） */
 var _mj = document.getElementById('mj');
 if (_mj && PLAYLISTS[0]) {
@@ -302,42 +294,6 @@ function extractAudios(aPlayer) {
         });
     }
     return result;
-}
-
-/* ====================================================
-   从 GitHub cache 分支加载歌单（离线可用）
-   ==================================================== */
-function loadFromCache(pl) {
-    return new Promise(function (resolve, reject) {
-        if (!CACHE_BASE) { reject('no cache'); return; }
-        var url = CACHE_BASE + '/playlists.json';
-        var xhr = new XMLHttpRequest();
-        xhr.open('GET', url + '?t=' + Date.now(), true);
-        xhr.timeout = 8000;
-        xhr.onload = function () {
-            if (xhr.status !== 200) { reject('http ' + xhr.status); return; }
-            try {
-                var data = JSON.parse(xhr.responseText);
-                var plData = data[pl.id];
-                if (!plData || !plData.tracks || plData.tracks.length === 0) { reject('empty'); return; }
-                var audios = [];
-                for (var i = 0; i < plData.tracks.length; i++) {
-                    var t = plData.tracks[i];
-                    audios.push({
-                        name: t.name || '未知',
-                        artist: t.artist || '',
-                        url: CACHE_BASE + '/' + t.url,
-                        cover: t.cover || '',
-                        theme: '#ffd700'
-                    });
-                }
-                resolve(audios);
-            } catch (e) { reject('parse'); }
-        };
-        xhr.onerror = function () { reject('network'); };
-        xhr.ontimeout = function () { reject('timeout'); };
-        xhr.send();
-    });
 }
 
 /* ====================================================
@@ -522,18 +478,10 @@ function switchPlaylist(idx) {
         $plist.innerHTML = '<div class="pe"><span class="da">加载中</span></div>';
         $phC.textContent = '--';
 
-        /* 优先从缓存加载，失败则 fallback 到 MetingJS */
-        loadFromCache(pl).then(function (audios) {
+        loadViaMeting(pl).then(function (audios) {
             if (curPLIdx !== idx && pendingIdx === -1) return;
             plCache[key] = audios;
             applyToPlayer(audios);
-        }).catch(function () {
-            /* 缓存未命中，走 MetingJS */
-            return loadViaMeting(pl).then(function (audios) {
-                if (curPLIdx !== idx && pendingIdx === -1) return;
-                plCache[key] = audios;
-                applyToPlayer(audios);
-            });
         }).catch(function () {
             if (curPLIdx !== idx) return;
             $plist.innerHTML = '<div class="pe">加载失败，请检查歌单ID和网络</div>';
@@ -655,49 +603,20 @@ setInterval(function () {
 buildTabs();
 $phT.textContent = PLAYLISTS[0].name;
 
-/* 启动：先尝试缓存，再 fallback 到 MetingJS */
-function initFromCache() {
-    return loadFromCache(PLAYLISTS[0]).then(function (audios) {
-        if (audios.length > 0) {
-            /* 需要先初始化 APlayer 实例（用缓存数据） */
-            ap = new APlayer({
-                container: document.getElementById('mb'),
-                audio: audios,
-                mini: false,
-                autoplay: false,
-                lrcType: 0,
-                mutex: true,
-                theme: '#ffd700'
-            });
-            plCache[ck(PLAYLISTS[0])] = audios;
-            bindEvents();
-            buildList(audios);
-            updateTrackUI(0);
-            $status.style.display = 'none';
-            $main.style.display = 'block';
-            return true;
-        }
-        return false;
-    });
-}
+waitForMeting(metingEl, 30).then(function (aPlayer) {
+    ap = aPlayer;
+    plCache[ck(PLAYLISTS[0])] = extractAudios(ap);
 
-initFromCache().catch(function () { return false; }).then(function (cacheHit) {
-    if (cacheHit) return; /* 缓存命中，不需要 MetingJS */
+    bindEvents();
+    buildList(ap.list.audios);
+    updateTrackUI(0);
 
-    /* 缓存未命中，走 MetingJS */
-    waitForMeting(metingEl, 30).then(function (aPlayer) {
-        ap = aPlayer;
-        plCache[ck(PLAYLISTS[0])] = extractAudios(ap);
-        bindEvents();
-        buildList(ap.list.audios);
-        updateTrackUI(0);
-        $status.style.display = 'none';
-        $main.style.display = 'block';
-    }).catch(function () {
-        $status.innerHTML = '加载失败，请检查：<br><br>1. 歌单 ID 是否正确<br>2. 歌单是否为公开状态<br>3. 网络是否可用<br><br><span style="font-size:0.75rem;opacity:0.4">可刷新页面重试</span>';
-        $status.style.textAlign = 'center';
-        $status.style.lineHeight = '2';
-    });
+    $status.style.display = 'none';
+    $main.style.display = 'block';
+}).catch(function () {
+    $status.innerHTML = '加载失败，请检查：<br><br>1. 歌单 ID 是否正确<br>2. 歌单是否为公开状态<br>3. 网络是否可用<br><br><span style="font-size:0.75rem;opacity:0.4">可刷新页面重试</span>';
+    $status.style.textAlign = 'center';
+    $status.style.lineHeight = '2';
 });
 </script>
 </body>
