@@ -187,6 +187,11 @@ var PLAYLISTS = [
     { id: '7225711996',  name: '旋曜玉帛',       server: 'netease' }
 ];
 
+/* 代理配置 — Cloudflare Worker */
+var PROXY_BASE = 'https://music.akira0803.workers.dev';
+var PROXY_API  = PROXY_BASE + '/api';
+var PROXY_AUDIO = PROXY_BASE + '/audio';
+
 /* 配置 <meting-js> 元素（在 meting.min.js 加载前完成） */
 var _mj = document.getElementById('mj');
 if (_mj && PLAYLISTS[0]) {
@@ -285,10 +290,12 @@ function extractAudios(aPlayer) {
     for (var i = 0; i < src.length; i++) {
         var u = src[i].url;
         if (!u) continue;
+        // 通过代理播放音频
+        var proxyUrl = PROXY_AUDIO + '/' + encodeURIComponent(u);
         result.push({
             name:   src[i].name   || src[i].title  || '未知',
             artist: src[i].artist || src[i].author  || '',
-            url:    u,
+            url:    proxyUrl,
             cover:  src[i].cover  || src[i].pic     || '',
             theme:  '#ffd700'
         });
@@ -297,30 +304,38 @@ function extractAudios(aPlayer) {
 }
 
 /* ====================================================
-   通过临时 MetingJS 元素加载歌单
+   通过代理 API 加载歌单（不依赖 MetingJS）
    ==================================================== */
 function loadViaMeting(pl) {
     return new Promise(function (resolve, reject) {
-        var wrap = document.createElement('div');
-        wrap.style.cssText = 'position:fixed;left:-9999px;top:0;width:0;height:0;overflow:hidden;pointer-events:none;';
-        document.body.appendChild(wrap);
-
-        var el = document.createElement('meting-js');
-        el.setAttribute('server', pl.server);
-        el.setAttribute('type', 'playlist');
-        el.setAttribute('id', pl.id);
-        el.setAttribute('theme', '#ffd700');
-        wrap.appendChild(el);
-
-        waitForMeting(el, 30).then(function (tmpAp) {
-            var audios = extractAudios(tmpAp);
-            try { tmpAp.pause(); } catch (e) {}
-            setTimeout(function () { try { wrap.remove(); } catch (e) {} }, 500);
-            resolve(audios);
-        }).catch(function () {
-            try { wrap.remove(); } catch (e) {}
-            reject();
-        });
+        var url = PROXY_API + '?server=' + pl.server + '&type=playlist&id=' + pl.id + '&r=' + Date.now();
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.timeout = 15000;
+        xhr.onload = function () {
+            if (xhr.status !== 200) { reject(new Error('API ' + xhr.status)); return; }
+            try {
+                var data = JSON.parse(xhr.responseText);
+                var audios = [];
+                for (var i = 0; i < data.length; i++) {
+                    var item = data[i];
+                    if (!item.url) continue;
+                    audios.push({
+                        name:   item.title  || item.name  || '未知',
+                        artist: item.author || item.artist || '',
+                        url:    PROXY_AUDIO + '/' + encodeURIComponent(item.url),
+                        cover:  item.pic    || item.cover  || '',
+                        theme:  '#ffd700'
+                    });
+                }
+                resolve(audios);
+            } catch (e) { reject(new Error('parse error')); }
+        };
+        xhr.onerror = function () { reject(new Error('network')); };
+        xhr.ontimeout = function () { reject(new Error('timeout')); };
+        xhr.send();
+    });
+}
     });
 }
 
@@ -603,17 +618,29 @@ setInterval(function () {
 buildTabs();
 $phT.textContent = PLAYLISTS[0].name;
 
-waitForMeting(metingEl, 30).then(function (aPlayer) {
-    ap = aPlayer;
-    plCache[ck(PLAYLISTS[0])] = extractAudios(ap);
+/* 启动：通过代理加载第一个歌单 */
+loadViaMeting(PLAYLISTS[0]).then(function (audios) {
+    plCache[ck(PLAYLISTS[0])] = audios;
+
+    /* 创建 APlayer 实例 */
+    ap = new APlayer({
+        container: document.getElementById('mb'),
+        audio: audios,
+        mini: false,
+        autoplay: false,
+        lrcType: 0,
+        mutex: true,
+        theme: '#ffd700'
+    });
 
     bindEvents();
-    buildList(ap.list.audios);
+    buildList(audios);
     updateTrackUI(0);
 
     $status.style.display = 'none';
     $main.style.display = 'block';
-}).catch(function () {
+}).catch(function (err) {
+    console.error('Load failed:', err);
     $status.innerHTML = '加载失败，请检查：<br><br>1. 歌单 ID 是否正确<br>2. 歌单是否为公开状态<br>3. 网络是否可用<br><br><span style="font-size:0.75rem;opacity:0.4">可刷新页面重试</span>';
     $status.style.textAlign = 'center';
     $status.style.lineHeight = '2';
