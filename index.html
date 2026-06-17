@@ -172,7 +172,6 @@
     </div>
 </div>
 
-<!-- MetingJS 容器（配置在下方脚本中动态完成） -->
 <div id="mb"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/aplayer@1.10.1/dist/APlayer.min.js"></script>
@@ -194,69 +193,115 @@ var PROXY_AUDIO = PROXY_BASE + '/audio';
 
 </script>
 
-
 <script>
+(function () {
+'use strict';
+
+/* ====================================================
+   常量
+   ==================================================== */
+var LS_VOLUME   = 'ffp_volume';
+var LS_LAST_IDX = 'ffp_lastIdx';
+var LS_LAST_PL  = 'ffp_lastPL';
+var RETRY_LIMIT = 3;
+var FPS = 4;
+
 /* ====================================================
    状态
    ==================================================== */
 var ap = null;
 var isPlaying = false;
-var curPLIdx = 0;
+var curPLIdx = parseInt(localStorage.getItem(LS_LAST_PL)) || 0;
+if (curPLIdx >= PLAYLISTS.length) curPLIdx = 0;
 var plCache = {};
 var switching = false;
 var pendingIdx = -1;
 var suppressListSwitch = false;
+var retryCount = 0;
+var progressRAF = null;
 
-
-/* DOM */
-var $status = document.getElementById('status');
-var $main   = document.getElementById('main');
-var $cimg   = document.getElementById('cimg');
-var $disc   = document.getElementById('disc');
-var $tn     = document.getElementById('tn');
-var $ta     = document.getElementById('ta');
-var $pfill  = document.getElementById('pfill');
-var $pbar   = document.getElementById('pbar');
-var $tc     = document.getElementById('tc');
-var $tt     = document.getElementById('tt');
-var $icP    = document.getElementById('icP');
-var $plist  = document.getElementById('plist');
-var $tabs   = document.getElementById('tabs');
-var $sinp   = document.getElementById('sinp');
-var $scl    = document.getElementById('scl');
-var $phT    = document.getElementById('phT');
-var $phC    = document.getElementById('phC');
+/* ====================================================
+   DOM 缓存
+   ==================================================== */
+var dom = {
+    status: document.getElementById('status'),
+    main:   document.getElementById('main'),
+    cimg:   document.getElementById('cimg'),
+    disc:   document.getElementById('disc'),
+    tn:     document.getElementById('tn'),
+    ta:     document.getElementById('ta'),
+    pfill:  document.getElementById('pfill'),
+    pbar:   document.getElementById('pbar'),
+    tc:     document.getElementById('tc'),
+    tt:     document.getElementById('tt'),
+    icP:    document.getElementById('icP'),
+    plist:  document.getElementById('plist'),
+    tabs:   document.getElementById('tabs'),
+    sinp:   document.getElementById('sinp'),
+    scl:    document.getElementById('scl'),
+    phT:    document.getElementById('phT'),
+    phC:    document.getElementById('phC'),
+    vol:    document.getElementById('vol'),
+    bPl:    document.getElementById('bPl'),
+    bPr:    document.getElementById('bPr'),
+    bNx:    document.getElementById('bNx'),
+    bSh:    document.getElementById('bSh'),
+    bLp:    document.getElementById('bLp')
+};
 
 /* ====================================================
    工具
    ==================================================== */
 function fmt(s) {
     if (!s || isNaN(s) || !isFinite(s)) return '0:00';
-    return Math.floor(s / 60) + ':' + (Math.floor(s % 60) < 10 ? '0' : '') + Math.floor(s % 60);
+    var m = Math.floor(s / 60);
+    var sec = Math.floor(s % 60);
+    return m + ':' + (sec < 10 ? '0' : '') + sec;
 }
 function ck(pl) { return pl.server + '-' + pl.id; }
+
+/* ====================================================
+   持久化
+   ==================================================== */
+function saveVolume(v) {
+    try { localStorage.setItem(LS_VOLUME, String(Math.round(v * 100))); } catch (_) {}
+}
+function loadVolume() {
+    var v = parseInt(localStorage.getItem(LS_VOLUME));
+    return isNaN(v) ? 70 : Math.max(0, Math.min(100, v));
+}
+function saveLastTrack() {
+    if (!ap) return;
+    try {
+        localStorage.setItem(LS_LAST_IDX, String(ap.list.index));
+        localStorage.setItem(LS_LAST_PL, String(curPLIdx));
+    } catch (_) {}
+}
 
 /* ====================================================
    星星
    ==================================================== */
 (function () {
-    var c = document.getElementById('stars'), n = Math.min(120, Math.floor(window.innerWidth * 0.1));
+    var c = document.getElementById('stars');
+    var n = Math.min(120, Math.floor(window.innerWidth * 0.1));
     var f = document.createDocumentFragment();
     for (var i = 0; i < n; i++) {
-        var s = document.createElement('div'); s.className = 'star';
+        var s = document.createElement('div');
+        s.className = 'star';
         var sz = Math.random() < 0.85 ? (Math.random() * 2 + 0.5) : (Math.random() * 2 + 2);
-        s.style.cssText = 'width:' + sz + 'px;height:' + sz + 'px;top:' + (Math.random() * 100).toFixed(1) + '%;left:' + (Math.random() * 100).toFixed(1) + '%;--lo:' + (Math.random() * 0.3 + 0.05).toFixed(2) + ';--hi:' + (Math.random() * 0.5 + 0.5).toFixed(2) + ';--d:' + (Math.random() * 4 + 2).toFixed(1) + 's;animation-delay:' + (Math.random() * 5).toFixed(1) + 's;';
+        s.style.cssText = 'width:' + sz + 'px;height:' + sz + 'px;top:' +
+            (Math.random() * 100).toFixed(1) + '%;left:' + (Math.random() * 100).toFixed(1) +
+            '%;--lo:' + (Math.random() * 0.3 + 0.05).toFixed(2) +
+            ';--hi:' + (Math.random() * 0.5 + 0.5).toFixed(2) +
+            ';--d:' + (Math.random() * 4 + 2).toFixed(1) +
+            's;animation-delay:' + (Math.random() * 5).toFixed(1) + 's;';
         f.appendChild(s);
     }
     c.appendChild(f);
 })();
 
 /* ====================================================
-   等待 MetingJS 元素就绪
-   ==================================================== */
-
-/* ====================================================
-   提取 audios（过滤空 URL，深拷贝解耦）
+   提取 audios
    ==================================================== */
 function extractAudios(aPlayer) {
     var result = [];
@@ -264,7 +309,6 @@ function extractAudios(aPlayer) {
     for (var i = 0; i < src.length; i++) {
         var u = src[i].url;
         if (!u) continue;
-        // 通过代理播放音频
         var proxyUrl = PROXY_AUDIO + '/' + encodeURIComponent(u);
         result.push({
             name:   src[i].name   || src[i].title  || '未知',
@@ -278,7 +322,7 @@ function extractAudios(aPlayer) {
 }
 
 /* ====================================================
-   通过代理 API 加载歌单（不依赖 MetingJS）
+   通过代理 API 加载歌单
    ==================================================== */
 function loadViaMeting(pl) {
     return new Promise(function (resolve, reject) {
@@ -312,10 +356,12 @@ function loadViaMeting(pl) {
 }
 
 /* ====================================================
-   应用数据到主 APlayer（深拷贝防污染）
+   应用数据到 APlayer
    ==================================================== */
 function applyToPlayer(audios) {
-    var copy = JSON.parse(JSON.stringify(audios));
+    var copy = (typeof structuredClone === 'function')
+        ? structuredClone(audios)
+        : JSON.parse(JSON.stringify(audios));
     suppressListSwitch = true;
     ap.list.clear();
     ap.list.add(copy);
@@ -325,40 +371,53 @@ function applyToPlayer(audios) {
 }
 
 /* ====================================================
-   列表 UI（构建，不做过滤）
+   列表 UI（DocumentFragment 批量构建）
    ==================================================== */
 function buildList(tracks) {
-    $plist.innerHTML = '';
+    var frag = document.createDocumentFragment();
     for (var i = 0; i < tracks.length; i++) {
-        (function (idx) {
-            var d = document.createElement('div');
-            d.className = 'pi' + (idx === ap.list.index ? ' on' : '');
-            d.dataset.ri = idx;
-            d.innerHTML =
-                '<span class="pi-i">' + (idx + 1) + '</span>' +
-                '<span class="pn">' + (tracks[idx].name || '未知') + '</span>' +
-                '<span class="pa">' + (tracks[idx].artist || '') + '</span>';
-            $plist.appendChild(d);
-        })(i);
+        var d = document.createElement('div');
+        d.className = 'pi' + (i === ap.list.index ? ' on' : '');
+        d.dataset.ri = i;
+
+        var idxSpan = document.createElement('span');
+        idxSpan.className = 'pi-i';
+        idxSpan.textContent = i + 1;
+
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'pn';
+        nameSpan.textContent = tracks[i].name || '未知';
+
+        var artistSpan = document.createElement('span');
+        artistSpan.className = 'pa';
+        artistSpan.textContent = tracks[i].artist || '';
+
+        d.appendChild(idxSpan);
+        d.appendChild(nameSpan);
+        d.appendChild(artistSpan);
+        frag.appendChild(d);
     }
-    /* 空状态占位 */
+
     var emp = document.createElement('div');
     emp.className = 'pe';
     emp.id = 'plEmp';
     emp.textContent = '未找到匹配的歌曲';
     emp.style.display = 'none';
-    $plist.appendChild(emp);
+    frag.appendChild(emp);
 
-    $phC.textContent = tracks.length + ' 首';
-    filterList($sinp.value);
+    dom.plist.innerHTML = '';
+    dom.plist.appendChild(frag);
+
+    dom.phC.textContent = tracks.length + ' 首';
+    filterList(dom.sinp.value);
 }
 
 /* ====================================================
-   列表过滤（不重建 DOM，只切换 display）
+   列表过滤
    ==================================================== */
 function filterList(keyword) {
     var kw = (keyword || '').toLowerCase();
-    var items = $plist.querySelectorAll('.pi');
+    var items = dom.plist.querySelectorAll('.pi');
     var shown = 0;
     for (var i = 0; i < items.length; i++) {
         var nm = items[i].querySelector('.pn').textContent.toLowerCase();
@@ -370,7 +429,7 @@ function filterList(keyword) {
             items[i].querySelector('.pi-i').textContent = shown;
         }
     }
-    $phC.textContent = shown + ' 首';
+    dom.phC.textContent = shown + ' 首';
     var emp = document.getElementById('plEmp');
     if (emp) emp.style.display = (shown === 0 && kw) ? '' : 'none';
 }
@@ -382,52 +441,115 @@ function updateTrackUI(idx) {
     var tracks = ap.list.audios;
     if (idx < 0 || idx >= tracks.length) return;
     var t = tracks[idx];
-    $disc.classList.add('fo');
-    setTimeout(function () {
-        $cimg.src = t.cover || '';
-        $cimg.style.display = t.cover ? '' : 'none';
-        $disc.classList.remove('fo');
-    }, 300);
-    $tn.textContent = t.name || '未知';
-    $ta.textContent = t.artist || '';
 
-    var items = $plist.querySelectorAll('.pi');
+    dom.disc.classList.add('fo');
+    setTimeout(function () {
+        dom.cimg.src = t.cover || '';
+        dom.cimg.style.display = t.cover ? '' : 'none';
+        dom.disc.classList.remove('fo');
+    }, 300);
+
+    dom.tn.textContent = t.name || '未知';
+    dom.ta.textContent = t.artist || '';
+
+    var items = dom.plist.querySelectorAll('.pi');
     for (var i = 0; i < items.length; i++) {
         items[i].classList.toggle('on', +items[i].dataset.ri === idx);
     }
-    var ac = $plist.querySelector('.pi.on');
+    var ac = dom.plist.querySelector('.pi.on');
     if (ac && ac.style.display !== 'none') {
         ac.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+
+    updateMediaSession(t);
+    saveLastTrack();
 }
 
+/* ====================================================
+   Media Session API
+   ==================================================== */
+function updateMediaSession(track) {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+        title: track.name || '未知',
+        artist: track.artist || '',
+        artwork: track.cover ? [{ src: track.cover, sizes: '200x200', type: 'image/jpeg' }] : []
+    });
+}
+
+function bindMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.setActionHandler('play',  function () { if (ap) ap.play(); });
+    navigator.mediaSession.setActionHandler('pause', function () { if (ap) ap.pause(); });
+    navigator.mediaSession.setActionHandler('previoustrack', function () {
+        if (!ap) return;
+        var i = (ap.list.index - 1 + ap.list.audios.length) % ap.list.audios.length;
+        ap.list.switch(i); setTimeout(function () { ap.play(); }, 80);
+    });
+    navigator.mediaSession.setActionHandler('nexttrack', function () {
+        if (!ap) return;
+        var i = (ap.list.index + 1) % ap.list.audios.length;
+        ap.list.switch(i); setTimeout(function () { ap.play(); }, 80);
+    });
+}
+
+/* ====================================================
+   播放/暂停图标
+   ==================================================== */
 function showPauseIcon() {
-    $icP.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
-    $disc.classList.add('on'); isPlaying = true;
+    dom.icP.innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
+    dom.disc.classList.add('on');
+    isPlaying = true;
+    startProgressLoop();
 }
 function showPlayIcon() {
-    $icP.innerHTML = '<path d="M8 5v14l11-7z"/>';
-    $disc.classList.remove('on'); isPlaying = false;
+    dom.icP.innerHTML = '<path d="M8 5v14l11-7z"/>';
+    dom.disc.classList.remove('on');
+    isPlaying = false;
+}
+
+/* ====================================================
+   进度条（requestAnimationFrame，暂停时不消耗）
+   ==================================================== */
+var lastProgressUpdate = 0;
+function progressTick(ts) {
+    if (!isPlaying || !ap || !ap.audio) { progressRAF = null; return; }
+    if (ts - lastProgressUpdate < 1000 / FPS) {
+        progressRAF = requestAnimationFrame(progressTick);
+        return;
+    }
+    lastProgressUpdate = ts;
+    var c = ap.audio.currentTime || 0;
+    var d = ap.audio.duration || 0;
+    dom.tc.textContent = fmt(c);
+    dom.tt.textContent = fmt(d);
+    dom.pfill.style.width = d > 0 ? ((c / d) * 100).toFixed(2) + '%' : '0%';
+    progressRAF = requestAnimationFrame(progressTick);
+}
+function startProgressLoop() {
+    if (!progressRAF) progressRAF = requestAnimationFrame(progressTick);
 }
 
 /* ====================================================
    Tab
    ==================================================== */
 function buildTabs() {
-    $tabs.innerHTML = '';
+    var frag = document.createDocumentFragment();
     for (var i = 0; i < PLAYLISTS.length; i++) {
-        (function (idx) {
-            var b = document.createElement('button');
-            b.className = 'tbn' + (idx === curPLIdx ? ' on' : '');
-            b.textContent = PLAYLISTS[idx].name;
-            b.addEventListener('click', function () { switchPlaylist(idx); });
-            $tabs.appendChild(b);
-        })(i);
+        var b = document.createElement('button');
+        b.className = 'tbn' + (i === curPLIdx ? ' on' : '');
+        b.textContent = PLAYLISTS[i].name;
+        b.addEventListener('click', (function (idx) {
+            return function () { switchPlaylist(idx); };
+        })(i));
+        frag.appendChild(b);
     }
+    dom.tabs.innerHTML = '';
+    dom.tabs.appendChild(frag);
 }
 
 /* ====================================================
-   切换歌单（缓存命中瞬间切换，未命中走 MetingJS）
+   切换歌单
    ==================================================== */
 function switchPlaylist(idx) {
     if (idx === curPLIdx && ap && ap.list.audios.length > 0) return;
@@ -437,9 +559,9 @@ function switchPlaylist(idx) {
     var cached = !!plCache[key];
 
     curPLIdx = idx;
+    try { localStorage.setItem(LS_LAST_PL, String(idx)); } catch (_) {}
 
-    /* Tab 高亮 */
-    var btns = $tabs.querySelectorAll('.tbn');
+    var btns = dom.tabs.querySelectorAll('.tbn');
     for (var i = 0; i < btns.length; i++) {
         btns[i].classList.remove('on', 'ld');
         if (i === idx) {
@@ -448,22 +570,18 @@ function switchPlaylist(idx) {
         }
     }
 
-    $sinp.value = '';
-    $scl.classList.remove('show');
-    $phT.textContent = pl.name;
+    dom.sinp.value = '';
+    dom.scl.classList.remove('show');
+    dom.phT.textContent = pl.name;
 
     if (cached) {
         applyToPlayer(plCache[key]);
     } else {
-        /* 正在加载中 → 记录 pending，加载完后自动切到目标 */
-        if (switching) {
-            pendingIdx = idx;
-            return;
-        }
+        if (switching) { pendingIdx = idx; return; }
 
         switching = true;
-        $plist.innerHTML = '<div class="pe"><span class="da">加载中</span></div>';
-        $phC.textContent = '--';
+        dom.plist.innerHTML = '<div class="pe"><span class="da">加载中</span></div>';
+        dom.phC.textContent = '--';
 
         loadViaMeting(pl).then(function (audios) {
             if (curPLIdx !== idx && pendingIdx === -1) return;
@@ -471,14 +589,13 @@ function switchPlaylist(idx) {
             applyToPlayer(audios);
         }).catch(function () {
             if (curPLIdx !== idx) return;
-            $plist.innerHTML = '<div class="pe">加载失败，请检查歌单ID和网络</div>';
-            $phC.textContent = '0 首';
+            dom.plist.innerHTML = '<div class="pe">加载失败，请检查歌单ID和网络</div>';
+            dom.phC.textContent = '0 首';
         }).finally(function () {
             switching = false;
-            var btns = $tabs.querySelectorAll('.tbn');
+            var btns = dom.tabs.querySelectorAll('.tbn');
             for (var i = 0; i < btns.length; i++) btns[i].classList.remove('ld');
 
-            /* 处理等待期间的切换请求 */
             if (pendingIdx !== -1 && pendingIdx !== curPLIdx) {
                 var next = pendingIdx;
                 pendingIdx = -1;
@@ -491,26 +608,26 @@ function switchPlaylist(idx) {
 }
 
 /* ====================================================
-   搜索（不重建 DOM，只过滤显示）
+   搜索
    ==================================================== */
 var searchTimer = null;
-$sinp.addEventListener('input', function () {
-    var v = $sinp.value.trim();
-    $scl.classList.toggle('show', v.length > 0);
+dom.sinp.addEventListener('input', function () {
+    var v = dom.sinp.value.trim();
+    dom.scl.classList.toggle('show', v.length > 0);
     clearTimeout(searchTimer);
     searchTimer = setTimeout(function () { filterList(v); }, 200);
 });
-$scl.addEventListener('click', function () {
-    $sinp.value = '';
-    $scl.classList.remove('show');
+dom.scl.addEventListener('click', function () {
+    dom.sinp.value = '';
+    dom.scl.classList.remove('show');
     filterList('');
-    $sinp.focus();
+    dom.sinp.focus();
 });
 
 /* ====================================================
    列表事件委托
    ==================================================== */
-$plist.addEventListener('click', function (e) {
+dom.plist.addEventListener('click', function (e) {
     var item = e.target.closest('.pi');
     if (!item || !ap) return;
     var idx = +item.dataset.ri;
@@ -521,16 +638,58 @@ $plist.addEventListener('click', function (e) {
 /* ====================================================
    控件
    ==================================================== */
-document.getElementById('bPl').onclick = function () { isPlaying ? ap.pause() : ap.play(); };
-document.getElementById('bPr').onclick = function () { var i = (ap.list.index - 1 + ap.list.audios.length) % ap.list.audios.length; ap.list.switch(i); setTimeout(function () { ap.play(); }, 80); };
-document.getElementById('bNx').onclick = function () { var i = (ap.list.index + 1) % ap.list.audios.length; ap.list.switch(i); setTimeout(function () { ap.play(); }, 80); };
-document.getElementById('bSh').onclick = function () { if (ap.list.audios.length < 2) return; var r; do { r = Math.floor(Math.random() * ap.list.audios.length); } while (r === ap.list.index); ap.list.switch(r); setTimeout(function () { ap.play(); }, 80); };
-document.getElementById('bLp').onclick = function () { ap.seek(0); ap.play(); };
-document.getElementById('vol').oninput = function () { ap.volume(this.value / 100, true); };
-$pbar.onclick = function (e) {
-    var r = $pbar.getBoundingClientRect(), p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-    if (ap.audio && ap.audio.duration && isFinite(ap.audio.duration)) ap.seek(p * ap.audio.duration);
+dom.bPl.onclick = function () { isPlaying ? ap.pause() : ap.play(); };
+dom.bPr.onclick = function () {
+    var i = (ap.list.index - 1 + ap.list.audios.length) % ap.list.audios.length;
+    ap.list.switch(i); setTimeout(function () { ap.play(); }, 80);
 };
+dom.bNx.onclick = function () {
+    var i = (ap.list.index + 1) % ap.list.audios.length;
+    ap.list.switch(i); setTimeout(function () { ap.play(); }, 80);
+};
+dom.bSh.onclick = function () {
+    if (ap.list.audios.length < 2) return;
+    var r; do { r = Math.floor(Math.random() * ap.list.audios.length); } while (r === ap.list.index);
+    ap.list.switch(r); setTimeout(function () { ap.play(); }, 80);
+};
+dom.bLp.onclick = function () { ap.seek(0); ap.play(); };
+
+/* 音量：持久化 */
+var savedVol = loadVolume();
+dom.vol.value = savedVol;
+dom.vol.oninput = function () {
+    var v = this.value / 100;
+    ap.volume(v, true);
+    saveVolume(v);
+};
+
+/* 进度条：点击 + 拖拽 seek */
+var seeking = false;
+function seekFromEvent(e) {
+    var r = dom.pbar.getBoundingClientRect();
+    var p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    if (ap && ap.audio && ap.audio.duration && isFinite(ap.audio.duration)) {
+        ap.seek(p * ap.audio.duration);
+    }
+}
+dom.pbar.addEventListener('mousedown', function (e) {
+    seeking = true;
+    dom.pfill.style.transition = 'none';
+    seekFromEvent(e);
+});
+document.addEventListener('mousemove', function (e) {
+    if (!seeking) return;
+    var r = dom.pbar.getBoundingClientRect();
+    var p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+    dom.pfill.style.width = (p * 100).toFixed(2) + '%';
+    seekFromEvent(e);
+});
+document.addEventListener('mouseup', function () {
+    if (seeking) {
+        seeking = false;
+        dom.pfill.style.transition = '';
+    }
+});
 
 /* ====================================================
    绑定 APlayer 事件
@@ -542,19 +701,35 @@ function bindEvents() {
         if (!suppressListSwitch) updateTrackUI(data.index);
     });
     ap.on('ended', function () {
+        retryCount = 0;
         var next = (ap.list.index + 1) % ap.list.audios.length;
         ap.list.switch(next);
         setTimeout(function () { ap.play(); }, 100);
     });
-    ap.volume(0.7, true);
+
+    /* 音频错误自动重试 */
+    ap.audio.addEventListener('error', function () {
+        retryCount++;
+        if (retryCount <= RETRY_LIMIT) {
+            setTimeout(function () { ap.play(); }, 1000);
+        } else {
+            retryCount = 0;
+            var next = (ap.list.index + 1) % ap.list.audios.length;
+            ap.list.switch(next);
+            setTimeout(function () { ap.play(); }, 200);
+        }
+    });
+    ap.audio.addEventListener('playing', function () { retryCount = 0; });
+
+    ap.volume(savedVol / 100, true);
+    bindMediaSession();
 }
 
 /* ====================================================
-   键盘快捷键（排除按钮焦点）
+   键盘快捷键
    ==================================================== */
 document.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON' || !ap) return;
-    var vol = document.getElementById('vol');
     switch (e.code) {
         case 'Space':
             e.preventDefault(); isPlaying ? ap.pause() : ap.play(); break;
@@ -562,39 +737,28 @@ document.addEventListener('keydown', function (e) {
             e.preventDefault(); ap.seek(Math.max(0, (ap.audio.currentTime || 0) - 5)); break;
         case 'ArrowRight':
             e.preventDefault(); ap.seek(Math.min(ap.audio.duration || 0, (ap.audio.currentTime || 0) + 5)); break;
-        case 'ArrowUp':
+        case 'ArrowUp': {
             e.preventDefault();
             var v1 = Math.min(1, (ap.audio.volume || 0) + 0.1);
-            ap.volume(v1, true); vol.value = Math.round(v1 * 100); break;
-        case 'ArrowDown':
+            ap.volume(v1, true); dom.vol.value = Math.round(v1 * 100); saveVolume(v1); break;
+        }
+        case 'ArrowDown': {
             e.preventDefault();
             var v2 = Math.max(0, (ap.audio.volume || 0) - 0.1);
-            ap.volume(v2, true); vol.value = Math.round(v2 * 100); break;
+            ap.volume(v2, true); dom.vol.value = Math.round(v2 * 100); saveVolume(v2); break;
+        }
     }
 });
-
-/* ====================================================
-   进度条（仅播放时更新）
-   ==================================================== */
-setInterval(function () {
-    if (!isPlaying || !ap || !ap.audio) return;
-    var c = ap.audio.currentTime || 0, d = ap.audio.duration || 0;
-    $tc.textContent = fmt(c);
-    $tt.textContent = fmt(d);
-    $pfill.style.width = d > 0 ? ((c / d) * 100).toFixed(2) + '%' : '0%';
-}, 400);
 
 /* ====================================================
    启动
    ==================================================== */
 buildTabs();
-$phT.textContent = PLAYLISTS[0].name;
+dom.phT.textContent = PLAYLISTS[curPLIdx].name;
 
-/* 启动：通过代理加载第一个歌单 */
 loadViaMeting(PLAYLISTS[0]).then(function (audios) {
     plCache[ck(PLAYLISTS[0])] = audios;
 
-    /* 创建 APlayer 实例 */
     ap = new APlayer({
         container: document.getElementById('mb'),
         audio: audios,
@@ -607,16 +771,24 @@ loadViaMeting(PLAYLISTS[0]).then(function (audios) {
 
     bindEvents();
     buildList(audios);
-    updateTrackUI(0);
 
-    $status.style.display = 'none';
-    $main.style.display = 'block';
+    /* 恢复上次播放位置 */
+    var lastIdx = parseInt(localStorage.getItem(LS_LAST_IDX));
+    if (!isNaN(lastIdx) && lastIdx >= 0 && lastIdx < ap.list.audios.length) {
+        ap.list.switch(lastIdx);
+    }
+    updateTrackUI(ap.list.index);
+
+    dom.status.style.display = 'none';
+    dom.main.style.display = 'block';
 }).catch(function (err) {
     console.error('Load failed:', err);
-    $status.innerHTML = '加载失败，请检查：<br><br>1. 歌单 ID 是否正确<br>2. 歌单是否为公开状态<br>3. 网络是否可用<br><br><span style="font-size:0.75rem;opacity:0.4">可刷新页面重试</span>';
-    $status.style.textAlign = 'center';
-    $status.style.lineHeight = '2';
+    dom.status.innerHTML = '加载失败，请检查：<br><br>1. 歌单 ID 是否正确<br>2. 歌单是否为公开状态<br>3. 网络是否可用<br><br><span style="font-size:0.75rem;opacity:0.4">可刷新页面重试</span>';
+    dom.status.style.textAlign = 'center';
+    dom.status.style.lineHeight = '2';
 });
+
+})();
 </script>
 </body>
 </html>
